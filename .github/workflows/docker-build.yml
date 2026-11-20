@@ -10,6 +10,9 @@
 #   REGISTRY_USERNAME / _PASSWORD     its credentials
 #   DOCKERHUB_USERNAME / _TOKEN       optional; if set, also push to docker.io/<namespace>/<image>
 #
+# Optional: with dockerhub-readme: true, release (tag) builds also replace the
+# Docker Hub "Repository overview" with the repo's README (dockerhub-readme-file).
+#
 # REGISTRY_URL is a secret, so the private registry never shows up in the logs
 # (it is masked as ***).
 #
@@ -68,6 +71,18 @@ on:
         description: "Branch prefix that marks feature branches"
         type: string
         default: "feature/"
+      dockerhub-readme:
+        description: "On tag builds, update the Docker Hub repository overview from dockerhub-readme-file"
+        type: boolean
+        default: false
+      dockerhub-readme-file:
+        description: "Markdown file (path from the repo root) used as the Docker Hub repository overview"
+        type: string
+        default: "README.md"
+      dockerhub-short-description:
+        description: "Docker Hub short description (max 100 chars; empty = leave unchanged)"
+        type: string
+        default: ""
     secrets:
       REGISTRY_URL:
         description: "Private registry including path, e.g. registry.example.com/team"
@@ -161,10 +176,12 @@ jobs:
           summary_bases=("private registry")
 
           dockerhub=false
+          dockerhub_repo=""
           if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
             dockerhub=true
             ns="$(echo "${DOCKERHUB_NAMESPACE:-$DOCKERHUB_USERNAME}" | tr '[:upper:]' '[:lower:]')"
-            bases+=("docker.io/${ns}/${image}")
+            dockerhub_repo="${ns}/${image}"
+            bases+=("docker.io/${dockerhub_repo}")
             summary_bases+=("docker.io/${ns}/${image}")
           elif [[ -n "$DOCKERHUB_USERNAME$DOCKERHUB_TOKEN" ]]; then
             echo "::error::Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (or neither)."
@@ -181,6 +198,7 @@ jobs:
           {
             echo "registry_host=$registry_host"
             echo "dockerhub=$dockerhub"
+            echo "dockerhub_repo=$dockerhub_repo"
             echo "refs<<EOF"
             printf '%s\n' "${refs[@]}"
             echo "EOF"
@@ -236,3 +254,20 @@ jobs:
             org.opencontainers.image.version=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Optional: Docker Hub "Repository overview" from the README (release builds only,
+      # so a feature branch never overwrites it). Relative links/images are turned into
+      # absolute GitHub URLs. Needs a token with Read, Write, Delete scope.
+      - name: Update Docker Hub repository overview
+        if: >-
+          inputs.dockerhub-readme &&
+          steps.refs.outputs.dockerhub == 'true' &&
+          steps.names.outputs.kind == 'release'
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.refs.outputs.dockerhub_repo }}
+          readme-filepath: ${{ inputs.dockerhub-readme-file }}
+          short-description: ${{ inputs.dockerhub-short-description }}
+          enable-url-completion: true

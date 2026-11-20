@@ -66,5 +66,27 @@ jobs:
 | `platforms`           | `linux/amd64`           | e.g. `linux/amd64,linux/arm64`               |
 | `latest-on-tag`       | `false`                 | Also push `:latest` for tag builds           |
 | `feature-prefix`      | `feature/`              | Branch prefix treated as feature branch      |
+| `dockerhub-readme`    | `false`                 | Update the Docker Hub repository overview (see below) |
+| `dockerhub-readme-file` | `README.md`           | Markdown file for the overview (path from repo root) |
+| `dockerhub-short-description` | empty (unchanged) | Docker Hub short description (max 100 chars) |
 
 Outputs: `tags` (tag names without registry, newline separated), `digest`.
+
+### Docker Hub repository overview (optional)
+
+With `dockerhub-readme: true`, release (tag) builds also replace the Docker Hub
+"Repository overview" with `dockerhub-readme-file` (via
+[peter-evans/dockerhub-description](https://github.com/peter-evans/dockerhub-description)).
+Feature-branch builds never touch it. Relative links and images in the Markdown are
+rewritten to absolute GitHub URLs. Skipped when the Docker Hub secrets are not set.
+
+- `DOCKERHUB_TOKEN` must have **Read, Write, Delete** scope (Read & Write is not enough
+  to edit the repository description).
+- Docker Hub limits the overview to 25,000 bytes.
+
+```yaml
+    with:
+      image-name: my-app
+      dockerhub-readme: true
+      dockerhub-short-description: "One-line description"   # optional
+```
