@@ -258,7 +258,9 @@ jobs:
       # Optional: Docker Hub "Repository overview" from the README (release builds only,
       # so a feature branch never overwrites it). Relative links/images are turned into
       # absolute GitHub URLs. Needs a token with Read, Write, Delete scope.
+      # A failure here only warns: the image is already pushed at this point.
       - name: Update Docker Hub repository overview
+        continue-on-error: true
         if: >-
           inputs.dockerhub-readme &&
           steps.refs.outputs.dockerhub == 'true' &&

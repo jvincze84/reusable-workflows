@@ -83,6 +83,8 @@ rewritten to absolute GitHub URLs. Skipped when the Docker Hub secrets are not s
 - `DOCKERHUB_TOKEN` must have **Read, Write, Delete** scope (Read & Write is not enough
   to edit the repository description).
 - Docker Hub limits the overview to 25,000 bytes.
+- If this step fails (e.g. wrong token scope), the run still succeeds - the image is
+  already pushed; check the step log / annotations.
 
 ```yaml
     with:
