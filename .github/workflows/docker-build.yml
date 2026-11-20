@@ -1,0 +1,238 @@
+# Reusable workflow: build a Docker image and push it to a private registry
+# and (optionally) to Docker Hub.
+#
+#   push to feature/<name>  ->  :feature-<name>, :feature-<name>-<short sha>
+#   push of tag <tag>       ->  :<tag>  (+ :latest if latest-on-tag is true)
+#   any other ref           ->  the job fails (nothing is pushed)
+#
+# Destinations (all from the caller's repository secrets):
+#   REGISTRY_URL                      private registry incl. path, e.g. registry.example.com/team
+#   REGISTRY_USERNAME / _PASSWORD     its credentials
+#   DOCKERHUB_USERNAME / _TOKEN       optional; if set, also push to docker.io/<namespace>/<image>
+#
+# REGISTRY_URL is a secret, so the private registry never shows up in the logs
+# (it is masked as ***).
+#
+# Example caller (.github/workflows/docker.yml in the application repo):
+#
+#   on:
+#     push:
+#       branches: ["feature/**"]
+#       tags: ["v*"]
+#   jobs:
+#     docker:
+#       uses: jvincze84/reusable-workflows/.github/workflows/docker-build.yml@main
+#       with:
+#         image-name: my-app
+#       secrets:
+#         REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+#         REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+#         REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+#         DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+#         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+name: Docker build
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name (default: the caller repository's name)"
+        type: string
+        default: ""
+      dockerhub-namespace:
+        description: "Docker Hub user/organization (default: DOCKERHUB_USERNAME)"
+        type: string
+        default: ""
+      context:
+        description: "Docker build context"
+        type: string
+        default: "."
+      dockerfile:
+        description: "Path to the Dockerfile (default: <context>/Dockerfile)"
+        type: string
+        default: ""
+      target:
+        description: "Dockerfile stage to build (default: the last stage)"
+        type: string
+        default: ""
+      platforms:
+        description: "Target platforms, e.g. linux/amd64,linux/arm64"
+        type: string
+        default: "linux/amd64"
+      latest-on-tag:
+        description: "Also tag release builds (git tags) as :latest"
+        type: boolean
+        default: false
+      feature-prefix:
+        description: "Branch prefix that marks feature branches"
+        type: string
+        default: "feature/"
+    secrets:
+      REGISTRY_URL:
+        description: "Private registry including path, e.g. registry.example.com/team"
+        required: true
+      REGISTRY_USERNAME:
+        required: true
+      REGISTRY_PASSWORD:
+        required: true
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+    outputs:
+      tags:
+        description: "Pushed tag names, without registry (newline separated)"
+        value: ${{ jobs.build.outputs.tags }}
+      digest:
+        description: "Image digest"
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.names.outputs.names }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      # Tag names only (no registry, no secrets involved)
+      - name: Compute tag names
+        id: names
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          LATEST_ON_TAG: ${{ inputs.latest-on-tag }}
+          FEATURE_PREFIX: ${{ inputs.feature-prefix }}
+        run: |
+          set -euo pipefail
+          # Docker tags: [A-Za-z0-9_.-], max 128 chars, must not start with . or -
+          sanitize() { echo "$1" | sed -E 's#[^A-Za-z0-9_.-]+#-#g; s#^[.-]+##' | cut -c1-120; }
+
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            kind="release"
+            names=("$(sanitize "$REF_NAME")")
+            [[ "$LATEST_ON_TAG" == "true" ]] && names+=("latest")
+          elif [[ "$REF_TYPE" == "branch" && "$REF_NAME" == "$FEATURE_PREFIX"* ]]; then
+            kind="feature"
+            name="$(sanitize "feature-${REF_NAME#"$FEATURE_PREFIX"}")"
+            names=("$name" "${name}-${SHA::7}")
+          else
+            echo "::error::Unsupported ref '$REF_NAME' ($REF_TYPE): only '${FEATURE_PREFIX}*' branches and tags are built."
+            exit 1
+          fi
+
+          {
+            echo "kind=$kind"
+            echo "names<<EOF"
+            printf '%s\n' "${names[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Full image references for every destination
+      - name: Compute image references
+        id: refs
+        shell: bash
+        env:
+          NAMES: ${{ steps.names.outputs.names }}
+          KIND: ${{ steps.names.outputs.kind }}
+          REPO: ${{ github.event.repository.name }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub-namespace }}
+        run: |
+          set -euo pipefail
+          image="$(echo "${IMAGE_NAME:-$REPO}" | tr '[:upper:]' '[:lower:]')"
+
+          registry_url="${REGISTRY_URL%/}"
+          registry_url="${registry_url#https://}"
+          registry_host="${registry_url%%/*}"
+          [[ -n "$registry_host" ]] || { echo "::error::REGISTRY_URL secret is empty"; exit 1; }
+          # the host alone is not a secret value -> mask it explicitly
+          echo "::add-mask::$registry_host"
+
+          bases=("${registry_url}/${image}")
+          summary_bases=("private registry")
+
+          dockerhub=false
+          if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
+            dockerhub=true
+            ns="$(echo "${DOCKERHUB_NAMESPACE:-$DOCKERHUB_USERNAME}" | tr '[:upper:]' '[:lower:]')"
+            bases+=("docker.io/${ns}/${image}")
+            summary_bases+=("docker.io/${ns}/${image}")
+          elif [[ -n "$DOCKERHUB_USERNAME$DOCKERHUB_TOKEN" ]]; then
+            echo "::error::Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (or neither)."
+            exit 1
+          else
+            echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not set - Docker Hub push skipped."
+          fi
+
+          refs=()
+          for b in "${bases[@]}"; do
+            while IFS= read -r n; do [[ -n "$n" ]] && refs+=("${b}:${n}"); done <<<"$NAMES"
+          done
+
+          {
+            echo "registry_host=$registry_host"
+            echo "dockerhub=$dockerhub"
+            echo "refs<<EOF"
+            printf '%s\n' "${refs[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Docker image ($KIND build)"
+            echo
+            echo "Tags:"
+            while IFS= read -r n; do [[ -n "$n" ]] && echo "- \`$n\`"; done <<<"$NAMES"
+            echo
+            echo "Pushed to:"
+            printf -- '- %s\n' "${summary_bases[@]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: inputs.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to private registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.refs.outputs.registry_host }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Log in to Docker Hub
+        if: steps.refs.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.target }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.refs.outputs.refs }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
