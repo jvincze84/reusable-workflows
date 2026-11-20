@@ -16,6 +16,7 @@ jobs:
     uses: jvincze84/reusable-workflows/.github/workflows/docker-build.yml@main
     with:
       image-name: pdf-manager
+      dockerhub-readme: true
     secrets:
       REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
       REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
